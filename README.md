@@ -20,6 +20,8 @@ Application will start after this command. Default port is 8080
 
 ## API Usage
 
+An API documentation (Swagger) page is hosted under http://localhost:8080/index.html
+
 ### Transaction Rest API
 ```sh
 POST http://localhost:8080/transactions
