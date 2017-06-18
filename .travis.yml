@@ -1,4 +1,3 @@
-sudo: false
 language: 
   - java
 jdk:
@@ -11,4 +10,4 @@ notifications:
 # whitelist
 branches:
   only:
-- master
+  - master
