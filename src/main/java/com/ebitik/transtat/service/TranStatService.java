@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.log4j.Logger;
 import org.springframework.stereotype.Service;
@@ -39,52 +39,41 @@ public class TranStatService {
 			.variableExpiration()
 			.asyncExpirationListener((key, transactionList) -> removeTransactionFromStatistic((List<Transaction>) transactionList))
 			.build();
-
-	/**
-	 * the total sum of transaction value in the last 60 seconds
-	 * */
-	AtomicReference<BigDecimal> sumHolder = new AtomicReference<>(BigDecimal.ZERO);
-	/**
-	 * the average amount of transaction value in the last 60 seconds
-	 * */
-	AtomicReference<BigDecimal> avgHolder = new AtomicReference<>(BigDecimal.ZERO);
-	/**
-	 * single highest transaction value in the last 60 seconds
-	 * */
-	AtomicReference<BigDecimal> maxHolder = new AtomicReference<>(BigDecimal.ZERO);
-	/**
-	 * single lowest transaction value in the last 60 seconds
-	 * */
-	AtomicReference<BigDecimal> minHolder = new AtomicReference<>(BigDecimal.ZERO);
-	/**
-	 * the total number of transactions happened in the last 60 seconds
-	 * */
-	AtomicReference<Long> countHolder = new AtomicReference<>(new Long(0));
-
 	
+	/**
+	 * single statistic object. addTransactionToStatistic and 
+	 * removeTransactionFromStatistic methods maintain this object
+	 * */
+	private Statistic statistic = new Statistic(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, Long.valueOf(0));
+	
+	/**
+	 * lock object
+	 * */
+	ReentrantLock lock = new ReentrantLock();
+
 	/**
 	 * This method adds a transaction for statistical purpose
 	 * 
 	 * @param transaction
 	 */
-	public synchronized void addTransaction(Transaction transaction) {
+	public void addTransaction(Transaction transaction) {
 		logger.debug("Adding: "+transaction);
-		
+
 		Long transactionTimestamp = transaction.getTimestamp();
 		//Find UTC millisecond value of 60 seconds before.
 		Long omaTimestamp = Instant.now().toEpochMilli()-60000;
-		
+
 		//throw an exception if transaction is out of last 60 seconds
 		if(transactionTimestamp < omaTimestamp) {
 			throw new LateTransactionException();
 		}
-		
+
 		//calculate sum, avg, count, min and max for statistics
 		addTransactionToStatistic(transaction);
-		
+
 		//find duration of this transaction. This transaction will be alive in this duration
 		long duration = (transactionTimestamp-omaTimestamp);
-		
+
 		//put transaction to expiringMap with its duration
 		List<Transaction> transactionList = expiringMap.get(transactionTimestamp);
 		if(Objects.isNull(transactionList)) {
@@ -92,17 +81,22 @@ public class TranStatService {
 		}
 		transactionList.add(transaction);
 		expiringMap.put(transactionTimestamp, transactionList, ExpirationPolicy.CREATED, duration, TimeUnit.MILLISECONDS);
-		
+
 		logger.debug("Added: "+transaction);
 	}
 
 	/**
-	 * This method returns current Statistic data which is ready.
+	 * This method returns current Statistic data which is always ready.
 	 * 
 	 * @return Statistic
 	 */
 	public Statistic getStatistic() {
-		return new Statistic(sumHolder.get(), avgHolder.get(), maxHolder.get(), minHolder.get(), countHolder.get());
+		try {
+			lock.lock();
+			return statistic;
+		} finally {
+			lock.unlock();
+		}
 	}
 
 	/**
@@ -111,15 +105,21 @@ public class TranStatService {
 	 * @param transaction
 	 */
 	private void addTransactionToStatistic(Transaction transaction) {
-		countHolder.updateAndGet(x -> x+1);
-		sumHolder.updateAndGet(x -> x.add(transaction.getAmount()));
-		avgHolder.updateAndGet(x -> sumHolder.get().divide(new BigDecimal(countHolder.get()), 2, BigDecimal.ROUND_HALF_UP));
-		if(maxHolder.get().compareTo(transaction.getAmount()) < 0) {
-			maxHolder.updateAndGet(x -> transaction.getAmount());
+		try {
+			lock.lock();
+			statistic.setCount(statistic.getCount()+1);
+			statistic.setSum(statistic.getSum().add(transaction.getAmount()));
+			statistic.setAvg(statistic.getSum().divide(new BigDecimal(statistic.getCount()), 2, BigDecimal.ROUND_HALF_UP));
+			if(statistic.getMax().compareTo(transaction.getAmount()) < 0) {
+				statistic.setMax(transaction.getAmount());
+			}
+			if(statistic.getMin().compareTo(BigDecimal.ZERO) == 0 || statistic.getMin().compareTo(transaction.getAmount()) > 0) {
+				statistic.setMin(transaction.getAmount());
+			}
+		} finally {
+			lock.unlock();
 		}
-		if(minHolder.get().compareTo(BigDecimal.ZERO) == 0 || minHolder.get().compareTo(transaction.getAmount()) > 0) {
-			minHolder.updateAndGet(x -> transaction.getAmount());
-		}
+
 	}
 
 	/**
@@ -129,22 +129,27 @@ public class TranStatService {
 	 * 
 	 * @param transaction
 	 */
-	private synchronized void removeTransactionFromStatistic(List<Transaction> transactionList) {
+	private void removeTransactionFromStatistic(List<Transaction> transactionList) {
 		for (Transaction transaction : transactionList) {
-			logger.debug("Expiring : " +transaction);
-			Long count = countHolder.updateAndGet(x -> x-1);
-			BigDecimal sum = sumHolder.updateAndGet(x -> x.subtract(transaction.getAmount()));
-			BigDecimal avg = BigDecimal.ZERO;
-			if(count > 0) {
-				avg = sum.divide(new BigDecimal(count), 2, BigDecimal.ROUND_HALF_UP);
+			try {
+				lock.lock();
+				logger.debug("Expiring : " +transaction);
+				statistic.setCount(statistic.getCount()-1);
+				statistic.setSum(statistic.getSum().subtract(transaction.getAmount()));
+				statistic.setAvg(BigDecimal.ZERO);
+				if(statistic.getCount() > 0) {
+					statistic.setAvg(statistic.getSum().divide(new BigDecimal(statistic.getCount()), 2, BigDecimal.ROUND_HALF_UP));
+				}
+				if(statistic.getMax().compareTo(transaction.getAmount()) == 0) {
+					statistic.setMax(findMaximumAmount());
+				}
+				if(statistic.getMin().compareTo(transaction.getAmount()) == 0) {
+					statistic.setMin(findMinAmount());
+				}
+				logger.debug("Expired: "+transaction);
+			} finally {
+				lock.unlock();
 			}
-			avgHolder.set(avg);
-			if(maxHolder.get().compareTo(transaction.getAmount()) == 0) {
-				maxHolder.set(findMaximumAmount());
-			} else if(minHolder.get().compareTo(transaction.getAmount()) == 0) {
-				minHolder.set(findMinAmount());
-			}
-			logger.debug("Expired: "+transaction);
 		}
 	}
 
