@@ -39,13 +39,13 @@ public class TranStatService {
 			.variableExpiration()
 			.asyncExpirationListener((key, transactionList) -> removeTransactionFromStatistic((List<Transaction>) transactionList))
 			.build();
-	
+
 	/**
 	 * single statistic object. addTransactionToStatistic and 
 	 * removeTransactionFromStatistic methods maintain this object
 	 * */
 	private Statistic statistic = new Statistic(BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, Long.valueOf(0));
-	
+
 	/**
 	 * lock object
 	 * */
@@ -91,12 +91,7 @@ public class TranStatService {
 	 * @return Statistic
 	 */
 	public Statistic getStatistic() {
-		try {
-			lock.lock();
-			return statistic;
-		} finally {
-			lock.unlock();
-		}
+		return statistic;
 	}
 
 	/**
@@ -107,15 +102,20 @@ public class TranStatService {
 	private void addTransactionToStatistic(Transaction transaction) {
 		try {
 			lock.lock();
-			statistic.setCount(statistic.getCount()+1);
-			statistic.setSum(statistic.getSum().add(transaction.getAmount()));
-			statistic.setAvg(statistic.getSum().divide(new BigDecimal(statistic.getCount()), 2, BigDecimal.ROUND_HALF_UP));
-			if(statistic.getMax().compareTo(transaction.getAmount()) < 0) {
-				statistic.setMax(transaction.getAmount());
+			Long count = statistic.getCount()+1;
+			BigDecimal sum = statistic.getSum().add(transaction.getAmount());
+			BigDecimal avg = sum.divide(new BigDecimal(count), 2, BigDecimal.ROUND_HALF_UP);
+			BigDecimal max = statistic.getMax();
+			if(max.compareTo(transaction.getAmount()) < 0) {
+				max = transaction.getAmount();
 			}
-			if(statistic.getMin().compareTo(BigDecimal.ZERO) == 0 || statistic.getMin().compareTo(transaction.getAmount()) > 0) {
-				statistic.setMin(transaction.getAmount());
+			BigDecimal min = statistic.getMin();
+			if(min.compareTo(BigDecimal.ZERO) == 0 || min.compareTo(transaction.getAmount()) > 0) {
+				min = transaction.getAmount();
 			}
+			
+			statistic = new Statistic(sum, avg, max, min, count);
+			
 		} finally {
 			lock.unlock();
 		}
@@ -134,18 +134,23 @@ public class TranStatService {
 			try {
 				lock.lock();
 				logger.debug("Expiring : " +transaction);
-				statistic.setCount(statistic.getCount()-1);
-				statistic.setSum(statistic.getSum().subtract(transaction.getAmount()));
-				statistic.setAvg(BigDecimal.ZERO);
-				if(statistic.getCount() > 0) {
-					statistic.setAvg(statistic.getSum().divide(new BigDecimal(statistic.getCount()), 2, BigDecimal.ROUND_HALF_UP));
+				Long count = statistic.getCount()-1;
+				BigDecimal sum = statistic.getSum().subtract(transaction.getAmount());
+				BigDecimal avg = BigDecimal.ZERO;
+				if(count > 0) {
+					avg = sum.divide(new BigDecimal(count), 2, BigDecimal.ROUND_HALF_UP);
 				}
-				if(statistic.getMax().compareTo(transaction.getAmount()) == 0) {
-					statistic.setMax(findMaximumAmount());
+				BigDecimal max = statistic.getMax();
+				if(max.compareTo(transaction.getAmount()) == 0) {
+					max = findMaximumAmount();
 				}
-				if(statistic.getMin().compareTo(transaction.getAmount()) == 0) {
-					statistic.setMin(findMinAmount());
+				BigDecimal min = statistic.getMin();
+				if(min.compareTo(transaction.getAmount()) == 0) {
+					min = findMinAmount();
 				}
+
+				statistic = new Statistic(sum, avg, max, min, count);
+
 				logger.debug("Expired: "+transaction);
 			} finally {
 				lock.unlock();
